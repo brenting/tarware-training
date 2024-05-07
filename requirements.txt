@@ -1,0 +1,8 @@
+-e ../task-assignment-robotic-warehouse
+torch
+tensordict
+pytest
+supersuit
+tyro
+wandb
+pandas
