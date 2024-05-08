@@ -49,6 +49,9 @@ class Agent:
 
         batch = TensorDict(batch, batch_size=batch_length, device=config.device)
 
+        if config.warehouse.sample_masking:
+            sample_mask = torch.tensor(np.array(self.buffer["sample_mask"][:-1], dtype=bool), device=config.device)
+            batch = batch[sample_mask]
 
         return batch
 
@@ -93,6 +96,8 @@ class PPOPolicyModule:
             self.agents[agent_id].add_to_buffer("logprobs", logprob)
             if "action_mask" in observations[agent_id]:
                 self.agents[agent_id].add_to_buffer("action_mask", observations[agent_id]["action_mask"])
+            if "sample_mask" in observations[agent_id]:
+                self.agents[agent_id].add_to_buffer("sample_mask", observations[agent_id]["sample_mask"])
                 
 
         return {agent_id: action for agent_id, action in zip(present_agents, actions.cpu().numpy())}

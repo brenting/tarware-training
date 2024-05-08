@@ -30,6 +30,7 @@ class WarehouseConfig:
     normalised_coordinates: bool = False
     render_mode: str | None = None
     action_masking: bool = True
+    sample_masking: bool = True
 
 
 @dataclass
@@ -151,7 +152,7 @@ def main():
         agents.clear_buffers()
 
         log_metrics = defaultdict(list)
-        for step in range(0, config.num_steps + 1):
+        for _ in range(0, config.num_steps + 1):
             global_step += config.num_envs
 
             agents.add_to_buffer({"dones": next_done})
