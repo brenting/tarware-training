@@ -168,6 +168,9 @@ def main():
             with torch.no_grad():
                 actions = agents.get_actions(next_obs)
 
+            if config.wandb:
+                logger.log({f"actions/{agent_id}": action for agent_id, action in actions.items()}, commit=False)
+
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, rewards, terminations, truncations, infos = env.step(actions)
             agents.add_to_buffer({"rewards": rewards})
@@ -187,7 +190,7 @@ def main():
 
             if "__common__" in infos:
                 for metric_name, data in infos["__common__"].items():
-                    log_metrics[metric_name].append(float(data))
+                    log_metrics[f"info/{metric_name}"].append(float(data))
         
 
         for name, data in log_metrics.items():
@@ -203,7 +206,7 @@ def main():
         if config.wandb:
             log_data.update({
                 "learning_rate": list(agents.policies.values())[0].optimizer.param_groups[0]["lr"],
-                "measures/SPS": int(global_step / (time.time() - start_time)),
+                "SPS": int(global_step / (time.time() - start_time)),
             })
             logger.log(log_data, step=global_step, commit=True)
 
