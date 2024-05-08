@@ -55,6 +55,9 @@ class Config:
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
+    # Multi-agent settings
+    ma_algorithm: Literal["snppo", "ippo"] = "snppo"
+
     # Algorithm specific arguments
     total_timesteps: int = 4_000_000
     """total timesteps of the experiments"""
@@ -102,7 +105,7 @@ def main():
     config.minibatch_size = int(config.batch_size // config.num_minibatches)
     config.num_iterations = config.total_timesteps // (config.num_envs * config.num_steps)
 
-    run_name = f"snppo_{datetime.now().strftime('%y-%m-%d_%H:%M:%S')}"
+    run_name = f"{config.ma_algorithm}_{datetime.now().strftime('%y-%m-%d_%H:%M:%S')}"
     if config.wandb:
         import wandb
         logger = wandb.init(
@@ -131,8 +134,11 @@ def main():
     # envs.single_action_space = envs.action_space
     # envs.is_vector_env = True
 
-
-    agent_policy_mapping = {agent_id: agent_id.split("_")[0] for agent_id in env.possible_agents}
+    if config.ma_algorithm == "ippo":
+        agent_policy_mapping = {agent_id: agent_id.split("_")[0] for agent_id in env.possible_agents}
+    elif config.ma_algorithm == "snppo":
+        agent_policy_mapping = {agent_id: agent_id for agent_id in env.possible_agents}
+    
     agents = MultiAgentModule(agent_policy_mapping, env, config)
     Path(f"models/{run_name}").mkdir(parents=True)
 
@@ -140,7 +146,7 @@ def main():
     global_step = 0
     start_time = time.time()
     next_obs, infos = env.reset(seed=config.seed)
-    next_done = {agent_id: 0 for agent_id in next_obs.keys()}
+    next_done = {agent_id: False for agent_id in next_obs.keys()}
 
     for iteration in range(1, config.num_iterations + 1):
         # Annealing the rate if instructed to do so.
