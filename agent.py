@@ -75,16 +75,16 @@ class PPOPolicyModule:
 
         obs_list = [observations[agent_id]["observation"] for agent_id in present_agents]
         obs_array = np.array(obs_list, dtype=np.float32)
-        stacked_obs = torch.tensor(obs_array, dtype=torch.float32, device=self.config.device)
+        stacked_obs = torch.tensor(obs_array, device=self.config.device)
 
-        stacked_mask = None
+        stacked_action_mask = None
         if "action_mask" in observations[present_agents[0]]:
-            mask_list = [observations[agent_id]["action_mask"] for agent_id in present_agents]
-            mask_array = np.array(mask_list, dtype=np.float32)
-            stacked_mask = torch.tensor(mask_array, dtype=torch.float32, device=self.config.device)
+            action_mask_list = [observations[agent_id]["action_mask"] for agent_id in present_agents]
+            action_mask_array = np.array(action_mask_list, dtype=np.float32)
+            stacked_action_mask = torch.tensor(action_mask_array, device=self.config.device)
 
         with torch.no_grad():
-            actions, logprobs, _, values = self.policy.get_action_and_value(stacked_obs, action_masks=stacked_mask)
+            actions, logprobs, _, values = self.policy.get_action_and_value(stacked_obs, action_masks=stacked_action_mask)
         
         for agent_id, value, action, logprob in zip(present_agents, values, actions, logprobs):
             self.agents[agent_id].add_to_buffer("observations", observations[agent_id]["observation"])
