@@ -16,16 +16,19 @@ class Agent:
         self.init_buffer()
 
     def init_buffer(self):
-        self.buffer = {"observations": [], "actions": [], "action_mask": [], "logprobs": [], "rewards": [], "dones": [], "values": []}
+        self.buffer = defaultdict(list)
+
+    def add_to_buffer(self, key, value):
+        self.buffer[key].append(np.array(value).squeeze())
 
     def get_train_batch(self, config) -> TensorDict:
         batch_length = len(self.buffer["observations"]) - 1
         next_done = self.buffer["dones"][-1]
         next_value = self.buffer["values"][-1]
 
-        batch = self.buffer
-        [data.pop() for data in batch.values()]
-        batch = {data_name: torch.tensor(np.array(data, dtype=np.float32).squeeze(), dtype=torch.float32, device=config.device) for data_name, data in batch.items()}
+        batch = {data_name: data[:-1] for data_name, data in self.buffer.items() if data_name != "sample_mask"}
+        
+        batch = {data_name: torch.tensor(np.array(data, dtype=np.float32).squeeze(), device=config.device) for data_name, data in batch.items()}
 
         with torch.no_grad():
             advantages = torch.zeros_like(batch["rewards"], device=config.device)
@@ -44,8 +47,10 @@ class Agent:
         batch["advantages"] = advantages
         batch["returns"] = returns
 
-        return TensorDict(batch, batch_size=batch_length, device=config.device)
+        batch = TensorDict(batch, batch_size=batch_length, device=config.device)
 
+
+        return batch
 
 class PPOPolicyModule:
     def __init__(self, agent_ids: list[str], action_space, observation_space, config):
@@ -82,12 +87,12 @@ class PPOPolicyModule:
             actions, logprobs, _, values = self.policy.get_action_and_value(stacked_obs, action_masks=stacked_mask)
         
         for agent_id, value, action, logprob in zip(present_agents, values, actions, logprobs):
-            self.agents[agent_id].buffer["observations"].append(observations[agent_id]["observation"])
-            self.agents[agent_id].buffer["values"].append(value)
-            self.agents[agent_id].buffer["actions"].append(action)
-            self.agents[agent_id].buffer["logprobs"].append(logprob)
-            if stacked_mask is not None:
-                self.agents[agent_id].buffer["action_mask"].append(observations[agent_id]["action_mask"])
+            self.agents[agent_id].add_to_buffer("observations", observations[agent_id]["observation"])
+            self.agents[agent_id].add_to_buffer("values", value)
+            self.agents[agent_id].add_to_buffer("actions", action)
+            self.agents[agent_id].add_to_buffer("logprobs", logprob)
+            if "action_mask" in observations[agent_id]:
+                self.agents[agent_id].add_to_buffer("action_mask", observations[agent_id]["action_mask"])
                 
 
         return {agent_id: action for agent_id, action in zip(present_agents, actions.cpu().numpy())}
@@ -95,7 +100,7 @@ class PPOPolicyModule:
     def add_to_buffer(self, data_dict: dict[str, Any]):
         for data_name, agent_dict in data_dict.items():
             for agent_id, data in agent_dict.items():
-                self.agents[agent_id].buffer[data_name].append(data)
+                self.agents[agent_id].add_to_buffer(data_name, data)
 
     def train(self):
         # bootstrap value if not done
@@ -251,7 +256,7 @@ class MultiAgentModule:
         self.policies: dict[str, PPOPolicyModule] = {}
         for policy_id, agent_ids in policy_agents_mapping.items():
             action_space = env.action_space(agent_ids[0])
-            observation_space = env.observation_space(agent_ids[0])
+            observation_space = env.observation_space(agent_ids[0])["observation"]
             self.policies[policy_id] = PPOPolicyModule(agent_ids, action_space, observation_space, config)
 
     def clear_buffers(self):
