@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import torch
@@ -30,7 +31,7 @@ class WarehouseConfig:
     normalised_coordinates: bool = False
     render_mode: str | None = None
     action_masking: bool = True
-    sample_masking: bool = True
+    sample_collection: Literal["all", "masking", "relevant"] = "masking"
 
 
 @dataclass
@@ -43,7 +44,7 @@ class Config:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = True
+    cuda: bool = False
     """if toggled, cuda will be enabled by default"""
     wandb: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""

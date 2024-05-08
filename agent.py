@@ -49,7 +49,7 @@ class Agent:
 
         batch = TensorDict(batch, batch_size=batch_length, device=config.device)
 
-        if config.warehouse.sample_masking:
+        if config.warehouse.sample_collection == "masking":
             sample_mask = torch.tensor(np.array(self.buffer["sample_mask"][:-1], dtype=bool), device=config.device)
             batch = batch[sample_mask]
 
