@@ -123,7 +123,7 @@ class PPOPolicyModule:
         b_values = batch["values"].reshape(-1)
 
         batch_size = b_obs.shape[0]
-        minibatch_size = batch_size // self.config.num_minibatches
+        minibatch_size = max(batch_size // self.config.num_minibatches, 1) #NOTE: hacky way to prevent errors with little samples
 
         # Optimizing the policy and value network
         b_inds = np.arange(batch_size)
