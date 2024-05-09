@@ -183,18 +183,18 @@ class PPOPolicyModule:
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
 
         log_data = {
-            "measures/batch_size": batch_size,
-            "measures/minibatch_size": minibatch_size,
-            "measures/unclipped_value": newvalue.mean().item(),
-            "measures/gradient_norm": total_norm.item(),
-            "losses/total_loss": loss.item(),
-            "losses/value_loss": v_loss.item(),
-            "losses/policy_loss": pg_loss.item(),
-            "losses/entropy": entropy_loss.item(),
-            "measures/old_approx_kl": old_approx_kl.item(),
-            "measures/approx_kl": approx_kl.item(),
-            "measures/clipfrac": np.mean(clipfracs),
-            "measures/explained_variance": explained_var,
+            "batch_size": batch_size,
+            "minibatch_size": minibatch_size,
+            "unclipped_value": newvalue.mean().item(),
+            "gradient_norm": total_norm.item(),
+            "total_loss": loss.item(),
+            "value_loss": v_loss.item(),
+            "policy_loss": pg_loss.item(),
+            "entropy": entropy_loss.item(),
+            "old_approx_kl": old_approx_kl.item(),
+            "approx_kl": approx_kl.item(),
+            "clipfrac": np.mean(clipfracs),
+            "explained_variance": explained_var,
         }
 
         return log_data
