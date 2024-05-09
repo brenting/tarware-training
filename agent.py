@@ -135,9 +135,9 @@ class PPOPolicyModule:
                 mb_inds = b_inds[start:end]
 
                 if self.config.warehouse.action_masking:
-                    _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(b_obs[mb_inds], action=b_actions.long()[mb_inds])
-                else:
                     _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(b_obs[mb_inds], action=b_actions.long()[mb_inds], action_masks=b_action_mask[mb_inds])
+                else:
+                    _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(b_obs[mb_inds], action=b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
