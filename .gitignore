@@ -4,3 +4,6 @@ __pycache__
 models
 output
 wandb
+analysis
+
+*.sbatch

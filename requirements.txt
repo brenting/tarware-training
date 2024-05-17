@@ -6,3 +6,5 @@ supersuit
 tyro
 wandb
 pandas
+plotly
+kaleido

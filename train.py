@@ -1,14 +1,16 @@
 import random
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
+import plotly.express as px
 
 import numpy as np
 import torch
 import tyro
+from gymnasium.spaces import flatten_space
 from tarware import ObserationType, RepeatedWarehouse, RewardType
 
 from agent import MultiAgentModule
@@ -31,7 +33,9 @@ class WarehouseConfig:
     normalised_coordinates: bool = False
     render_mode: str | None = None
     action_masking: bool = True
-    sample_collection: Literal["all", "masking", "relevant"] = "masking"
+    sample_collection: Literal["all", "masking", "relevant"] = "relevant"
+    no_observations: bool = False
+    improved_masking: bool = True
 
 
 @dataclass
@@ -44,7 +48,7 @@ class Config:
     """seed of the experiment"""
     torch_deterministic: bool = True
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
-    cuda: bool = False
+    cuda: bool = True
     """if toggled, cuda will be enabled by default"""
     wandb: bool = False
     """if toggled, this experiment will be tracked with Weights and Biases"""
@@ -56,10 +60,10 @@ class Config:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Multi-agent settings
-    ma_algorithm: Literal["snppo", "ippo"] = "snppo"
+    ma_algorithm: Literal["snppo", "ippo"] = "ippo"
 
     # Algorithm specific arguments
-    total_timesteps: int = 4_000_000
+    total_timesteps: int = 2_000_000
     """total timesteps of the experiments"""
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
@@ -73,7 +77,7 @@ class Config:
     """the discount factor gamma"""
     gae_lambda: float = 0.96
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 30
+    num_minibatches: int = 4
     """the number of mini-batches"""
     update_epochs: int = 4
     """the K epochs to update the policy"""
@@ -92,11 +96,7 @@ class Config:
     target_kl: float | None = None
     """the target KL divergence threshold"""
 
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+    plotting: bool = True
 
 
 def main():
@@ -134,9 +134,9 @@ def main():
     # envs.single_action_space = envs.action_space
     # envs.is_vector_env = True
 
-    if config.ma_algorithm == "ippo":
+    if config.ma_algorithm == "snppo":
         agent_policy_mapping = {agent_id: agent_id.split("_")[0] for agent_id in env.possible_agents}
-    elif config.ma_algorithm == "snppo":
+    elif config.ma_algorithm == "ippo":
         agent_policy_mapping = {agent_id: agent_id for agent_id in env.possible_agents}
     
     agents = MultiAgentModule(agent_policy_mapping, env, config)
@@ -148,69 +148,105 @@ def main():
     next_obs, infos = env.reset(seed=config.seed)
     next_done = {agent_id: False for agent_id in next_obs.keys()}
 
-    for iteration in range(1, config.num_iterations + 1):
+    actions_data = {agent_id: np.zeros((config.num_iterations // 50, flatten_space(env.action_space(agent_id)).shape[0]), dtype=int) for agent_id in next_obs.keys()}
+    actions_relevant_data = {agent_id: np.zeros((config.num_iterations // 50, flatten_space(env.action_space(agent_id)).shape[0]), dtype=int) for agent_id in next_obs.keys()}
+
+    actions_layout_data = {agent_id: np.zeros((config.num_iterations // 50, env.grid_size[0] + 1, env.grid_size[1]), dtype=int) for agent_id in next_obs.keys()}
+    actions_layout_relevant_data = {agent_id: np.zeros((config.num_iterations // 50, env.grid_size[0] + 1, env.grid_size[1]), dtype=int) for agent_id in next_obs.keys()}
+
+
+    for iteration in range(config.num_iterations):
+        start_time_iter = time.time()
         # Annealing the rate if instructed to do so.
         if config.anneal_lr:
-            frac = 1.0 - (iteration - 1.0) / config.num_iterations
+            frac = 1.0 - iteration / config.num_iterations
             lrnow = frac * config.learning_rate
             for policy in agents.policies.values():
                 policy.optimizer.param_groups[0]["lr"] = lrnow
 
         agents.clear_buffers()
 
+        start_time_rollout = time.time()
+        time_counter = Counter()
         log_metrics = defaultdict(list)
-        for _ in range(0, config.num_steps + 1):
+        for _ in range(0, config.num_steps):
             global_step += config.num_envs
 
-            agents.add_to_buffer({"dones": next_done})
+            agents.add_observations_dones(next_obs, next_done)
 
             # ALGO LOGIC: action logic
             with torch.no_grad():
+                start_tmp = time.time()
                 actions = agents.get_actions(next_obs)
+                time_counter.update({"policy_sample": time.time() - start_tmp})
+            
+            
+            for agent_id, action in actions.items():
+                location = env.item_loc_dict.get(int(action), (-1, 0))
+                actions_data[agent_id][iteration // 50, action] += 1
+                actions_layout_data[agent_id][(iteration // 50,) + location] += 1
+                if not infos[agent_id]["busy"]:
+                    actions_relevant_data[agent_id][iteration // 50, action] += 1
+                    actions_layout_relevant_data[agent_id][(iteration // 50,) + location] += 1
 
-            if config.wandb:
-                logger.log({f"actions/{agent_id}": action for agent_id, action in actions.items()}, commit=False)
+            if config.wandb and "__step_common__" in infos:
+                logger.log({f"step/{info_id}": data for info_id, data in infos["__step_common__"].items()}, step=global_step, commit=False)
+
 
             # TRY NOT TO MODIFY: execute the game and log data.
+            start_tmp = time.time()
             next_obs, rewards, terminations, truncations, infos = env.step(actions)
-            agents.add_to_buffer({"rewards": rewards})
+            time_counter.update({"step": time.time() - start_tmp})
+
+
+            agents.add_rewards(rewards)
             next_done = {agent_id: truncations[agent_id] or term for agent_id, term in terminations.items()}
 
-            # next_done_np = np.logical_or(terminations, truncations)
-            # buffer.rewards[step] = torch.tensor(reward).to(device).view(-1)
-            # next_obs = torch.Tensor(next_obs).to(device)
-            # next_done = torch.Tensor(next_done_np).to(device)
 
-            if any(list(next_done.values())):
-                for agent_id, done in next_done.items():
-                    if done:
-                        episode_info = infos[agent_id]["episode"]
-                        log_metrics["mean_episode_return"].append(float(episode_info["return"]))
-                        log_metrics["mean_episode_length"].append(float(episode_info["length"]))
+            for agent_id, done in next_done.items():
+                if done:
+                    episode_info = infos[agent_id]["episode"]
+                    log_metrics[f"mean_episode_return/{agent_id}"].append(float(episode_info["return"]))
+                    log_metrics[f"mean_episode_length/{agent_id}"].append(float(episode_info["length"]))
 
             if "__common__" in infos:
                 for metric_name, data in infos["__common__"].items():
                     log_metrics[f"info/{metric_name}"].append(float(data))
-        
 
-        for name, data in log_metrics.items():
-            mean = sum(data) / len(data) if len(data) > 0 else 0
-            if config.wandb:
-                logger.log({name: mean}, step=global_step, commit=False)
-            print(f"{name}: {mean}")
+        end_time_rollout = time.time()
 
-        log_data = agents.train()
+        log_data = {name: sum(data) / len(data) if len(data) > 0 else 0 for name, data in log_metrics.items()}
+        log_data["time/rollout"] = end_time_rollout - start_time_rollout
+        log_data["time/step"] = time_counter["step"]
+        log_data["time/policy_sample"] = time_counter["policy_sample"]
+
+        start_time_train = time.time()
+        log_data.update(agents.train())
+        log_data["time/train"] = time.time() - start_time_train
 
         agents.save(f"models/{run_name}")
 
+        log_data["time/iter"] = time.time() - start_time_iter
+        log_data["learning_rate"] = list(agents.policies.values())[0].optimizer.param_groups[0]["lr"]
+        log_data["SPS"] = int(global_step / (time.time() - start_time))
+
         if config.wandb:
-            log_data.update({
-                "learning_rate": list(agents.policies.values())[0].optimizer.param_groups[0]["lr"],
-                "SPS": int(global_step / (time.time() - start_time)),
-            })
+            if ((iteration + 1) % 50 == 0) and config.plotting:
+                log_data.update({f"actions/{agent_id}": px.imshow(actions, text_auto=True) for agent_id, actions in actions_data.items()})
+                log_data.update({f"actions_relevant/{agent_id}": px.imshow(actions, text_auto=True) for agent_id, actions in actions_relevant_data.items()})
+                log_data.update({f"actions_log/{agent_id}": px.imshow(np.log10(actions + 1), text_auto=True) for agent_id, actions in actions_data.items()})
+                log_data.update({f"actions_log_relevant/{agent_id}": px.imshow(np.log10(actions + 1), text_auto=True) for agent_id, actions in actions_relevant_data.items()})
+                
+                log_data.update({f"actions_layout/{agent_id}": px.imshow(actions[iteration // 50], text_auto=True) for agent_id, actions in actions_layout_data.items()})
+                log_data.update({f"actions_layout_relevant/{agent_id}": px.imshow(actions[iteration // 50], text_auto=True) for agent_id, actions in actions_layout_relevant_data.items()})
+                log_data.update({f"actions_layout_log/{agent_id}": px.imshow(np.log10(actions[iteration // 50] + 1), text_auto=True) for agent_id, actions in actions_layout_data.items()})
+                log_data.update({f"actions_layout_log_relevant/{agent_id}": px.imshow(np.log10(actions[iteration // 50] + 1), text_auto=True) for agent_id, actions in actions_layout_relevant_data.items()})
+
+            log_data["time/iter"] = time.time() - start_time_iter
             logger.log(log_data, step=global_step, commit=True)
 
-        print("SPS:", int(global_step / (time.time() - start_time)))
+        print("SPS:", log_data["SPS"])
+        del log_data
     
     env.close()
 

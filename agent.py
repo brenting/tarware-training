@@ -2,6 +2,7 @@ from collections import defaultdict
 from typing import Any
 
 import numpy as np
+from numpy import ndarray
 import torch
 from gymnasium.spaces import flatten_space
 from pettingzoo import ParallelEnv
@@ -16,41 +17,87 @@ class Agent:
         self.init_buffer()
 
     def init_buffer(self):
-        self.buffer = defaultdict(list)
+        self.has_samples = False
 
-    def add_to_buffer(self, key, value):
-        self.buffer[key].append(np.array(value).squeeze())
+        self.observations = []
+        self.dones = []
+        self.actions = []
+        self.values = []
+        self.logprobs = []
+        self.rewards = []
 
-    def get_train_batch(self, config) -> TensorDict:
-        batch_length = len(self.buffer["observations"]) - 1
-        next_done = self.buffer["dones"][-1]
-        next_value = self.buffer["values"][-1]
+        self.action_masks = []
+        self.sample_masks = []
 
-        batch = {data_name: data[:-1] for data_name, data in self.buffer.items() if data_name != "sample_mask"}
-        
-        batch = {data_name: torch.tensor(np.array(data, dtype=np.float32).squeeze(), device=config.device) for data_name, data in batch.items()}
+    def add_observation_done(self, observation: dict[str, ndarray], done: bool):
+        self.observation = observation
+        self.done = done
 
-        with torch.no_grad():
-            advantages = torch.zeros_like(batch["rewards"], device=config.device)
-            lastgaelam = 0
-            for t in reversed(range(batch_length)):
-                if t == batch_length - 1:
-                    nextnonterminal = 1.0 - next_done
-                    nextvalues = next_value
-                else:
-                    nextnonterminal = 1.0 - batch["dones"][t + 1]
-                    nextvalues = batch["values"][t + 1]
-                delta = batch["rewards"][t] + config.gamma * nextvalues * nextnonterminal - batch["values"][t]
-                advantages[t] = lastgaelam = delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
-            returns = advantages + batch["values"]
+    def add_policy_sample(self, action: Tensor, value: Tensor, logprob: Tensor):
+        self.action = action
+        self.value = value
+        self.logprob = logprob
+
+    def add_reward(self, reward: np.float32):
+        self.reward = reward
+        self.flush_full_sample()
+
+    def flush_full_sample(self):
+        self.has_samples = True
+
+        self.observations.append(self.observation["observation"])
+        self.dones.append(self.done)
+        self.actions.append(self.action)
+        self.values.append(self.value)
+        self.logprobs.append(self.logprob)
+        self.rewards.append(self.reward)
+
+        if "action_mask" in self.observation:
+            self.action_masks.append(self.observation["action_mask"])
+        if "sample_mask" in self.observation:
+            self.sample_masks.append(self.observation["sample_mask"])
+
+    def get_train_batch(self, policy, config) -> TensorDict:
+        batch_length = len(self.observations)
+
+        batch = {
+            "observations": torch.tensor(np.array(self.observations, dtype=np.float32).squeeze(), device=config.device),
+            "dones": torch.tensor(np.array(self.dones, dtype=np.float32).squeeze(), device=config.device),
+            "rewards": torch.tensor(np.array(self.rewards, dtype=np.float32).squeeze(), device=config.device),
+            "actions": torch.tensor(self.actions, dtype=torch.int64, device=config.device).squeeze(),
+            "values": torch.tensor(self.values, dtype=torch.float32, device=config.device).squeeze(),
+            "logprobs": torch.tensor(self.logprobs, dtype=torch.float32, device=config.device).squeeze(),
+        }
+        if self.action_masks:
+            batch["action_masks"] = torch.tensor(np.array(self.action_masks, dtype=np.float32).squeeze(), device=config.device)
+
+        if batch_length == 1:
+            # Add first dimension if batch has only one sample
+            batch = {data_name: data[None, ...] for data_name, data in batch.items()}
+        batch = TensorDict(batch, batch_size=batch_length, device=config.device)
+
+        next_obs = torch.tensor(self.observation["observation"], dtype=torch.float32, device=config.device)
+        next_done = torch.tensor(self.done, dtype=torch.float32, device=config.device)
+        next_value = policy.get_value(next_obs)
+
+        advantages = torch.zeros_like(batch["rewards"], device=config.device)
+        lastgaelam = 0
+        for t in reversed(range(batch_length)):
+            if t == batch_length - 1:
+                nextnonterminal = 1.0 - next_done
+                nextvalues = next_value
+            else:
+                nextnonterminal = 1.0 - batch["dones"][t + 1]
+                nextvalues = batch["values"][t + 1]
+            delta = batch["rewards"][t] + config.gamma * nextvalues * nextnonterminal - batch["values"][t]
+            advantages[t] = lastgaelam = delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
+        returns = advantages + batch["values"]
 
         batch["advantages"] = advantages
         batch["returns"] = returns
 
-        batch = TensorDict(batch, batch_size=batch_length, device=config.device)
-
-        if config.warehouse.sample_collection == "masking":
-            sample_mask = torch.tensor(np.array(self.buffer["sample_mask"][:-1], dtype=bool), device=config.device)
+        if self.sample_masks:
+            sample_mask = torch.tensor(np.array(self.sample_masks, dtype=bool), device=config.device)
             batch = batch[sample_mask]
 
         return batch
@@ -90,34 +137,48 @@ class PPOPolicyModule:
             actions, logprobs, _, values = self.policy.get_action_and_value(stacked_obs, action_masks=stacked_action_mask)
         
         for agent_id, value, action, logprob in zip(present_agents, values, actions, logprobs):
-            self.agents[agent_id].add_to_buffer("observations", observations[agent_id]["observation"])
-            self.agents[agent_id].add_to_buffer("values", value)
-            self.agents[agent_id].add_to_buffer("actions", action)
-            self.agents[agent_id].add_to_buffer("logprobs", logprob)
-            if "action_mask" in observations[agent_id]:
-                self.agents[agent_id].add_to_buffer("action_mask", observations[agent_id]["action_mask"])
-            if "sample_mask" in observations[agent_id]:
-                self.agents[agent_id].add_to_buffer("sample_mask", observations[agent_id]["sample_mask"])
-                
+            self.agents[agent_id].add_policy_sample(action, value, logprob)
 
         return {agent_id: action for agent_id, action in zip(present_agents, actions.cpu().numpy())}
     
-    def add_to_buffer(self, data_dict: dict[str, Any]):
-        for data_name, agent_dict in data_dict.items():
-            for agent_id, data in agent_dict.items():
-                self.agents[agent_id].add_to_buffer(data_name, data)
+    def add_observations_dones(self, observations: dict[str, Any], dones: dict[str, Any]):
+        assert observations.keys() == dones.keys()
+        for agent_id, observation in observations.items():
+            self.agents[agent_id].add_observation_done(observation, dones[agent_id])
+    
+    def add_rewards(self, rewards: dict[str, Any]):
+        for agent_id, reward in rewards.items():
+            self.agents[agent_id].add_reward(reward)
 
     def train(self):
         # bootstrap value if not done
-        batch_list = [agent.get_train_batch(self.config) for agent in self.agents.values()]
+        #NOTE: all kinds of dirty tricky here to check for empty batches, should be more rigid
+        with torch.no_grad():
+            batch_list = [agent.get_train_batch(self.policy, self.config) for agent in self.agents.values() if agent.has_samples]
+        if not batch_list:
+            print(f"WARNING: No samples gathered for agents {self.agent_ids}")
+            return {}
+        
         batch = torch.cat(batch_list)
+
+        # pd.DataFrame(
+        #     {
+        #         "actions": batch["actions"].reshape(-1).numpy(),
+        #         "logprobs": batch["logprobs"].reshape(-1).numpy(),
+        #         "rewards": batch["rewards"].reshape(-1).numpy(),
+        #         "advantages": batch["advantages"].reshape(-1).numpy(),
+        #         "returns": batch["returns"].reshape(-1).numpy(),
+        #         "values": batch["values"].reshape(-1).numpy(),
+        #         "dones": batch["dones"].reshape(-1).numpy(),
+        #     }
+        # ).to_csv(f"analysis/log_buffer_{self.agent_ids[0]}-{self.agent_ids[-1]}.csv")
 
         # flatten the batch
         b_obs = batch["observations"].reshape((-1,) + self.observation_space.shape)
         b_logprobs = batch["logprobs"].reshape(-1)
         b_actions = batch["actions"].reshape((-1,) + self.action_space.shape)
         if self.config.warehouse.action_masking:
-            b_action_mask = batch["action_mask"].reshape((-1,) + flatten_space(self.action_space).shape)
+            b_action_mask = batch["action_masks"].reshape((-1,) + flatten_space(self.action_space).shape)
         b_advantages = batch["advantages"].reshape(-1)
         b_returns = batch["returns"].reshape(-1)
         b_values = batch["values"].reshape(-1)
@@ -230,7 +291,7 @@ class PPO(nn.Module):
         )
 
     def get_value(self, observations) -> Tensor:
-        return self.critic(observations)
+        return self.critic(observations) 
 
     def get_action_and_value(
         self, observations, action=None, action_masks=None
@@ -247,13 +308,11 @@ class PPO(nn.Module):
             action = probs.sample()
         elif action is None and not self.training:
             action = probs.mode
-        return action, probs.log_prob(action), probs.entropy(), self.critic(observations)
+        return action, probs.log_prob(action), probs.entropy(), self.get_value(observations)
 
 
 class MultiAgentModule:
-    def __init__(self, agent_policy_mapping: dict[str, str], env: ParallelEnv, config):
-        self.agent_policy_mapping = agent_policy_mapping
-        
+    def __init__(self, agent_policy_mapping: dict[str, str], env: ParallelEnv, config, module_class=PPOPolicyModule):
         policy_agents_mapping = defaultdict(list)
         for agent_id, policy_id in agent_policy_mapping.items():
             policy_agents_mapping[policy_id].append(agent_id)
@@ -262,33 +321,42 @@ class MultiAgentModule:
         for policy_id, agent_ids in policy_agents_mapping.items():
             action_space = env.action_space(agent_ids[0])
             observation_space = env.observation_space(agent_ids[0])["observation"]
-            self.policies[policy_id] = PPOPolicyModule(agent_ids, action_space, observation_space, config)
+            self.policies[policy_id] = module_class(agent_ids, action_space, observation_space, config)
 
     def clear_buffers(self):
         [policy.clear_buffers() for policy in self.policies.values()]
 
-    def iter_policy_agent_dict(self, agent_dict: dict[str, Any]):
-        for policy_id, policy in self.policies.items():
-            policy_agent_dict = {agent_id: data for agent_id, data in agent_dict.items() if self.agent_policy_mapping[agent_id] == policy_id}
-            yield policy, policy_agent_dict
+    def iter_policy_agent_dicts(self, *agent_dicts: dict[str, Any]):
+        for policy in self.policies.values():
+            pa_dicts = []
+            for agent_dict in agent_dicts:
+                pa_dict = {agent_id: agent_dict[agent_id] for agent_id in policy.agent_ids if agent_id in agent_dict}
+                if not pa_dict:
+                    continue
+                pa_dicts.append(pa_dict)
+            if not pa_dicts:
+                continue
+            yield policy, pa_dicts if len(pa_dicts) > 1 else pa_dicts[0]
 
     def get_actions(self, observations: dict[str, Any]):
         actions = {}
-        for policy, policy_observations in self.iter_policy_agent_dict(observations):
+        for policy, policy_observations in self.iter_policy_agent_dicts(observations):
             actions.update(policy.get_actions(policy_observations))
-
         return actions
 
-    def add_to_buffer(self, data_dict):
-        for data_name, agent_dict in data_dict.items():
-            for policy, policy_agent_dict in self.iter_policy_agent_dict(agent_dict):
-                policy.add_to_buffer({data_name: policy_agent_dict})
+    def add_observations_dones(self, observations, dones):
+        for policy, (policy_observations, policy_dones) in self.iter_policy_agent_dicts(observations, dones):
+            policy.add_observations_dones(policy_observations, policy_dones)
+
+    def add_rewards(self, rewards: dict[str, Any]):
+        for policy, policy_rewards in self.iter_policy_agent_dicts(rewards):
+            policy.add_rewards(policy_rewards)
 
     def train(self):
         combined_log_data = {}
-        for policy_id, policy_module in self.policies.items():
+        for policy_id, policy in self.policies.items():
             #TODO: parallelize?
-            log_data = policy_module.train()
+            log_data = policy.train()
             log_data = {f"{name}/{policy_id}": data for name, data in log_data.items()}
             combined_log_data.update(log_data)
 
@@ -297,3 +365,46 @@ class MultiAgentModule:
     def save(self, directory):
         for policy_id, policy in self.policies.items():
             torch.save(policy.policy.state_dict(), f"{directory}/{policy_id}")
+    
+    def load(self, directory):
+        for policy_id, policy in self.policies.items():
+            policy.policy.load_state_dict(torch.load(f"{directory}/{policy_id}"))
+
+
+class HeuristicPolicyModule:
+    def __init__(self, agent_ids: list[str], action_space, observation_space, config):
+        super().__init__()
+        assert isinstance(agent_ids, list)
+        self.agent_ids = agent_ids
+
+    def get_actions(self, observations: dict[str, Any]):
+        actions = {}
+        for agent_id, observation in observations.items():
+            action_mask = observation["action_mask"]
+
+            # allowed_shelves = np.argwhere(action_mask).squeeze()
+            # if len(allowed_shelves.shape) == 0:
+            #     allowed_shelves = np.array([allowed_shelves])
+            # actions[agent_id] = np.random.choice(allowed_shelves)
+
+            allowed_shelves = np.argwhere(action_mask[11:]).squeeze()
+            if len(allowed_shelves.shape) == 0:
+                allowed_shelves = np.array([allowed_shelves])
+
+            if agent_id.split("_")[0] == "AGV":
+                if len(allowed_shelves) > 0:
+                    action = np.random.choice(allowed_shelves) + 11
+                elif action_mask[1]:
+                    action = np.int64(agent_id.split("_")[-1])
+                else:
+                    action = np.int64(0)
+            elif agent_id.split("_")[0] == "PICKER":
+                if len(allowed_shelves) > 0:
+                    action = np.random.choice(allowed_shelves) + 11
+                else:
+                    action = np.int64(0)
+            
+            assert action in np.argwhere(action_mask).squeeze()
+            actions[agent_id] = action
+
+        return actions
