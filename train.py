@@ -33,7 +33,7 @@ class WarehouseConfig:
     normalised_coordinates: bool = False
     render_mode: str | None = None
     action_masking: bool = True
-    sample_collection: Literal["all", "masking", "relevant"] = "relevant"
+    sample_collection: Literal["all", "masking", "relevant"] = "masking"
     no_observations: bool = False
     improved_masking: bool = True
 
@@ -96,6 +96,7 @@ class Config:
     target_kl: float | None = None
     """the target KL divergence threshold"""
 
+    zero_value: bool = False
     plotting: bool = True
 
 

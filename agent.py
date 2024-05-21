@@ -113,7 +113,7 @@ class PPOPolicyModule:
 
         self.agents = {agent_id: Agent(agent_id) for agent_id in self.agent_ids}
 
-        self.policy = PPO(self.action_space, self.observation_space).to(config.device)
+        self.policy = PPO(self.action_space, self.observation_space, config).to(config.device)
 
         self.optimizer = optim.Adam(self.policy.parameters(), lr=config.learning_rate, eps=1e-3)
 
@@ -268,7 +268,7 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class PPO(nn.Module):      
-    def __init__(self, action_space, observation_space):
+    def __init__(self, action_space, observation_space, config):
         super().__init__()
 
         self.critic = nn.Sequential(
@@ -290,8 +290,13 @@ class PPO(nn.Module):
             layer_init(nn.Linear(128, flatten_space(action_space).shape[0]), std=0.01),
         )
 
-    def get_value(self, observations) -> Tensor:
-        return self.critic(observations) 
+        if config.zero_value:
+            self.get_value = lambda _: torch.tensor([0], dtype=torch.float32, device=config.device)
+        else:
+            self.get_value = self._get_value
+        
+    def _get_value(self, observations) -> Tensor:
+        return self.critic(observations)
 
     def get_action_and_value(
         self, observations, action=None, action_masks=None
