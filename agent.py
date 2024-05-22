@@ -58,7 +58,7 @@ class Agent:
             self.sample_masks.append(self.observation["sample_mask"])
 
     def get_train_batch(self, policy, config) -> TensorDict:
-        batch_length = len(self.observations)
+        batch_size = len(self.observations)
 
         batch = {
             "observations": torch.tensor(np.array(self.observations, dtype=np.float32).squeeze(), device=config.device),
@@ -71,30 +71,27 @@ class Agent:
         if self.action_masks:
             batch["action_masks"] = torch.tensor(np.array(self.action_masks, dtype=np.float32).squeeze(), device=config.device)
 
-        if batch_length == 1:
+        if batch_size == 1:
             # Add first dimension if batch has only one sample
             batch = {data_name: data[None, ...] for data_name, data in batch.items()}
-        batch = TensorDict(batch, batch_size=batch_length, device=config.device)
+        batch = TensorDict(batch, batch_size=batch_size, device=config.device)
 
         next_obs = torch.tensor(self.observation["observation"], dtype=torch.float32, device=config.device)
         next_done = torch.tensor(self.done, dtype=torch.float32, device=config.device)
         next_value = policy.get_value(next_obs)
 
-        advantages = torch.zeros_like(batch["rewards"], device=config.device)
+        batch["advantages"] = torch.zeros_like(batch["rewards"], device=config.device)
         lastgaelam = 0
-        for t in reversed(range(batch_length)):
-            if t == batch_length - 1:
+        for t in reversed(range(batch_size)):
+            if t == batch_size - 1:
                 nextnonterminal = 1.0 - next_done
                 nextvalues = next_value
             else:
                 nextnonterminal = 1.0 - batch["dones"][t + 1]
                 nextvalues = batch["values"][t + 1]
             delta = batch["rewards"][t] + config.gamma * nextvalues * nextnonterminal - batch["values"][t]
-            advantages[t] = lastgaelam = delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
-        returns = advantages + batch["values"]
-
-        batch["advantages"] = advantages
-        batch["returns"] = returns
+            batch["advantages"][t] = lastgaelam = delta + config.gamma * config.gae_lambda * nextnonterminal * lastgaelam
+        batch["returns"] = batch["advantages"] + batch["values"]
 
         if self.sample_masks:
             sample_mask = torch.tensor(np.array(self.sample_masks, dtype=bool), device=config.device)
