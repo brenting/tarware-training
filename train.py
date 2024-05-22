@@ -225,7 +225,8 @@ def main():
         log_data.update(agents.train())
         log_data["time/train"] = time.time() - start_time_train
 
-        agents.save(f"models/{run_name}")
+        if (iteration + 1) % 50 == 0:
+            agents.save(f"models/{run_name}")
 
         log_data["time/iter"] = time.time() - start_time_iter
         log_data["learning_rate"] = list(agents.policies.values())[0].optimizer.param_groups[0]["lr"]
