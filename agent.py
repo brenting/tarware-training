@@ -148,7 +148,6 @@ class PPOPolicyModule:
             self.agents[agent_id].add_reward(reward)
 
     def train(self):
-        # bootstrap value if not done
         #NOTE: all kinds of dirty tricky here to check for empty batches, should be more rigid
         with torch.no_grad():
             batch_list = [agent.get_train_batch(self.policy, self.config) for agent in self.agents.values() if agent.has_samples]
@@ -157,6 +156,10 @@ class PPOPolicyModule:
             return {}
         
         batch = torch.cat(batch_list)
+
+        if len(batch) == 0:
+            print(f"WARNING: No samples gathered for agents {self.agent_ids}")
+            return {}
 
         # pd.DataFrame(
         #     {
