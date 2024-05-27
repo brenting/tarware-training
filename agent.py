@@ -1,10 +1,12 @@
 from collections import defaultdict
+import math
 from typing import Any
 
 import numpy as np
-from numpy import ndarray
 import torch
+import torch.nn.functional as F
 from gymnasium.spaces import flatten_space
+from numpy import ndarray
 from pettingzoo import ParallelEnv
 from tensordict import TensorDict
 from torch import Tensor, nn, optim
@@ -99,8 +101,102 @@ class Agent:
 
         return batch
 
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
+class ActorCritic(nn.Module):      
+    def __init__(self, action_space, observation_space, config):
+        super().__init__()
+
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(flatten_space(observation_space).shape[0], 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 1), std=1.0),
+        )
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(flatten_space(observation_space).shape[0], 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, flatten_space(action_space).shape[0]), std=0.01),
+        )
+
+        self.get_value = self._get_zero_value if config.zero_value else self._get_value
+        
+    def _get_value(self, observations) -> Tensor:
+        return self.critic(observations)
+
+    def _get_zero_value(self, observations: Tensor) -> Tensor:
+        if len(observations.shape) > 1:
+            values = torch.zeros((observations.shape[0], 1), dtype=torch.float32, device=observations.device)
+        else:
+            values = torch.tensor([0], dtype=torch.float32, device=observations.device)
+        return values
+
+    def get_action_and_value(
+        self, observations, action=None, action_masks=None
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        logits: Tensor = self.actor(observations)
+
+        if action_masks is not None:
+            inf_mask = torch.clamp(torch.log(action_masks), min=torch.finfo(action_masks.dtype).min)
+            logits = logits + inf_mask
+
+        probs = Categorical(logits=logits)
+
+        if action is None:
+            action = probs.sample()
+        elif action is None and not self.training:
+            action = probs.mode
+        return action, probs.log_prob(action), probs.entropy(), self.get_value(observations)
+
+
+class DirectDistribution(nn.Module):      
+    def __init__(self, action_space, observation_space, config):
+        super().__init__()
+        self.config = config
+        self.actor = nn.Parameter(torch.ones([flatten_space(action_space).shape[0]], dtype=torch.float32, device=config.device), requires_grad=True)
+        
+    def get_value(self, observations) -> Tensor:
+        if len(observations.shape) > 1:
+            values = torch.zeros((observations.shape[0], 1), dtype=torch.float32, device=observations.device)
+        else:
+            values = torch.tensor([0], dtype=torch.float32, device=observations.device)
+        return values
+
+    def get_action_and_value(
+        self, observations, action=None, action_masks=None
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        logits: Tensor = F.relu(self.actor)
+
+        if len(observations.shape) > 1:
+            logits = torch.tile(logits, (observations.shape[0], 1))
+
+        if action_masks is not None:
+            inf_mask = torch.clamp(torch.log(action_masks), min=torch.finfo(action_masks.dtype).min)
+            logits = logits + inf_mask
+
+        probs = Categorical(logits=logits)
+
+        if action is None:
+            action = probs.sample()
+        elif action is None and not self.training:
+            action = probs.mode
+        return action, probs.log_prob(action), probs.entropy(), self.get_value(observations)
+
+
 class PPOPolicyModule:
-    def __init__(self, agent_ids: list[str], action_space, observation_space, config):
+    def __init__(self, agent_ids: list[str], action_space, observation_space, env, config):
         super().__init__()
         assert isinstance(agent_ids, list)
         self.agent_ids = agent_ids
@@ -110,7 +206,7 @@ class PPOPolicyModule:
 
         self.agents = {agent_id: Agent(agent_id) for agent_id in self.agent_ids}
 
-        self.policy = PPO(self.action_space, self.observation_space, config).to(config.device)
+        self.policy = config.model_class.value(self.action_space, self.observation_space, config).to(config.device)
 
         self.optimizer = optim.Adam(self.policy.parameters(), lr=config.learning_rate, eps=1e-3)
 
@@ -261,63 +357,8 @@ class PPOPolicyModule:
         return log_data
 
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-
-class PPO(nn.Module):      
-    def __init__(self, action_space, observation_space, config):
-        super().__init__()
-
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(flatten_space(observation_space).shape[0], 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 1), std=1.0),
-        )
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(flatten_space(observation_space).shape[0], 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, 128)),
-            nn.ReLU(),
-            layer_init(nn.Linear(128, flatten_space(action_space).shape[0]), std=0.01),
-        )
-
-        if config.zero_value:
-            self.get_value = lambda _: torch.tensor([0], dtype=torch.float32, device=config.device)
-        else:
-            self.get_value = self._get_value
-        
-    def _get_value(self, observations) -> Tensor:
-        return self.critic(observations)
-
-    def get_action_and_value(
-        self, observations, action=None, action_masks=None
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        logits: Tensor = self.actor(observations)
-
-        if action_masks is not None:
-            inf_mask = torch.clamp(torch.log(action_masks), min=torch.finfo(action_masks.dtype).min)
-            logits = logits + inf_mask
-
-        probs = Categorical(logits=logits)
-
-        if action is None:
-            action = probs.sample()
-        elif action is None and not self.training:
-            action = probs.mode
-        return action, probs.log_prob(action), probs.entropy(), self.get_value(observations)
-
-
 class MultiAgentModule:
-    def __init__(self, agent_policy_mapping: dict[str, str], env: ParallelEnv, config, module_class=PPOPolicyModule):
+    def __init__(self, agent_policy_mapping: dict[str, str], env: ParallelEnv, config):
         policy_agents_mapping = defaultdict(list)
         for agent_id, policy_id in agent_policy_mapping.items():
             policy_agents_mapping[policy_id].append(agent_id)
@@ -326,7 +367,7 @@ class MultiAgentModule:
         for policy_id, agent_ids in policy_agents_mapping.items():
             action_space = env.action_space(agent_ids[0])
             observation_space = env.observation_space(agent_ids[0])["observation"]
-            self.policies[policy_id] = module_class(agent_ids, action_space, observation_space, config)
+            self.policies[policy_id] = config.policy_module.value(agent_ids, action_space, observation_space, env, config)
 
     def clear_buffers(self):
         [policy.clear_buffers() for policy in self.policies.values()]
@@ -377,39 +418,106 @@ class MultiAgentModule:
 
 
 class HeuristicPolicyModule:
-    def __init__(self, agent_ids: list[str], action_space, observation_space, config):
+    def __init__(self, agent_ids: list[str], action_space, observation_space, env, config):
         super().__init__()
         assert isinstance(agent_ids, list)
         self.agent_ids = agent_ids
+        self.item_loc_dict = env.item_loc_dict
+
+        if len(env.possible_agents) == 12:
+            x_delivery = 24
+            self.lane_assignment = {
+                "AGV_1": 3,
+                "AGV_2": 6,
+                "AGV_3": 7,
+                "AGV_4": 10,
+                "AGV_5": 11,
+                "AGV_6": 14,
+                "AGV_7": 15,
+                "AGV_8": 18,
+                "PICKER_9": 4,
+                "PICKER_10": 8,
+                "PICKER_11": 13,
+                "PICKER_12": 15,
+            }
+        elif len(env.possible_agents) == 21:
+            x_delivery = 44
+            self.lane_assignment = {
+                "AGV_1": 2,
+                "AGV_2": 3,
+                "AGV_3": 6,
+                "AGV_4": 7,
+                "AGV_5": 10,
+                "AGV_6": 11,
+                "AGV_7": 14,
+                "AGV_8": 15,
+                "AGV_9": 18,
+                "AGV_10": 19,
+                "AGV_11": 22,
+                "AGV_12": 23,
+                "AGV_13": 26,
+                "AGV_14": 27,
+                "PICKER_15": 3,
+                "PICKER_16": 7,
+                "PICKER_17": 11,
+                "PICKER_18": 14,
+                "PICKER_19": 18,
+                "PICKER_20": 22,
+                "PICKER_21": 26,
+            }
+
+        x_agent_ref = x_delivery - 4
+        self.delivery_assignment = {}
+        for agent_id, lane_y in self.lane_assignment.items():
+            if agent_id.startswith("AGV"):
+                for delivery_id, location in env.item_loc_dict.items():
+                    if location[1] == lane_y:
+                        break
+                self.delivery_assignment[agent_id] = delivery_id
+
+        # self.lane_assignment.update({agent_id: env.item_loc_dict[delivery_id][1] for agent_id, delivery_id in self.delivery_assignment.items()})
+
+        self.shelf_preferences = {}
+        y_factor = 8
+        for agent_id in agent_ids:
+            shelf_preference = []
+            lane_y = self.lane_assignment[agent_id]
+            for item_id in range(len(env.item_loc_dict)):
+                x, y = env.item_loc_dict[item_id + 1]
+                if x == x_delivery:
+                    continue
+                shelf_preference.append(math.sqrt((x - x_agent_ref)**2 + ((y - lane_y) * y_factor)**2))
+            
+            shelf_preference_sorted = [sorted(shelf_preference).index(x) for x in shelf_preference]
+            self.shelf_preferences[agent_id] = np.array(shelf_preference_sorted, dtype=np.int64)
+
 
     def get_actions(self, observations: dict[str, Any]):
         actions = {}
         for agent_id, observation in observations.items():
             action_mask = observation["action_mask"]
 
-            # allowed_shelves = np.argwhere(action_mask).squeeze()
-            # if len(allowed_shelves.shape) == 0:
-            #     allowed_shelves = np.array([allowed_shelves])
-            # actions[agent_id] = np.random.choice(allowed_shelves)
+            if agent_id.startswith("AGV"):
+                shelf_action_shift = 11 if len(self.lane_assignment) == 12 else 15
+                to_deliver = action_mask[1]
+            elif agent_id.startswith("PICKER"):
+                shelf_action_shift = 1
+                to_deliver = False
 
-            allowed_shelves = np.argwhere(action_mask[11:]).squeeze()
-            if len(allowed_shelves.shape) == 0:
-                allowed_shelves = np.array([allowed_shelves])
+            shelves_mask = action_mask[shelf_action_shift:]
+            any_shelves = np.any(shelves_mask)
 
-            if agent_id.split("_")[0] == "AGV":
-                if len(allowed_shelves) > 0:
-                    action = np.random.choice(allowed_shelves) + 11
-                elif action_mask[1]:
-                    action = np.int64(agent_id.split("_")[-1])
-                else:
-                    action = np.int64(0)
-            elif agent_id.split("_")[0] == "PICKER":
-                if len(allowed_shelves) > 0:
-                    action = np.random.choice(allowed_shelves) + 11
-                else:
-                    action = np.int64(0)
+            if any_shelves:
+                action_preferences = np.where(shelves_mask, self.shelf_preferences[agent_id], 1e6)
+                action = np.int64(np.argmin(action_preferences) + shelf_action_shift)
+            elif to_deliver:
+                action = np.int64(self.delivery_assignment[agent_id])
+            else:
+                action = np.int64(0)
+
             
             assert action in np.argwhere(action_mask).squeeze()
             actions[agent_id] = action
 
         return actions
+
