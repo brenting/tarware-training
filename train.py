@@ -1,20 +1,35 @@
 import random
 import time
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import asdict, dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Literal
-import plotly.express as px
 
 import numpy as np
+import plotly.express as px
 import torch
 import tyro
 from gymnasium.spaces import flatten_space
-from tarware import ObserationType, RepeatedWarehouse, RewardType
+from tarware import RepeatedWarehouse, RewardType
 
-from agent import MultiAgentModule
+from agent import (
+    ActorCritic,
+    DirectDistribution,
+    HeuristicPolicyModule,
+    MultiAgentModule,
+    PPOPolicyModule,
+)
 
+
+class PolicyModule(Enum):
+    PPO = PPOPolicyModule
+    Heuristic = HeuristicPolicyModule
+
+class ModelClass(Enum):
+    ActorCritic = ActorCritic
+    DirectDistribution = DirectDistribution
 
 @dataclass
 class WarehouseConfig:
@@ -29,13 +44,13 @@ class WarehouseConfig:
     max_inactivity_steps: int | None = None
     max_steps: int = 500
     reward_type: RewardType = RewardType.INDIVIDUAL
-    observation_type: ObserationType = ObserationType.FLATTENED
+    observation_type: Literal["flattened", "identifier", "status", "none"] = "flattened"
     normalised_coordinates: bool = False
     render_mode: str | None = None
     action_masking: bool = True
     sample_collection: Literal["all", "masking", "relevant"] = "masking"
-    no_observations: bool = False
-    improved_masking: bool = True
+    improved_masking: bool = False
+    agents_can_clash: bool = True
 
 
 @dataclass
@@ -61,6 +76,8 @@ class Config:
 
     # Multi-agent settings
     ma_algorithm: Literal["snppo", "ippo"] = "ippo"
+    policy_module: Literal[PolicyModule.PPO, PolicyModule.Heuristic] = PolicyModule.PPO
+    model_class: Literal[ModelClass.ActorCritic, ModelClass.DirectDistribution] = ModelClass.ActorCritic
 
     # Algorithm specific arguments
     total_timesteps: int = 2_000_000
@@ -168,7 +185,8 @@ def main():
         agents.clear_buffers()
 
         start_time_rollout = time.time()
-        time_counter = Counter()
+        time_counter = defaultdict(float)
+        duplicate_action_count = {"AGV": 0, "PICKER": 0}
         log_metrics = defaultdict(list)
         for _ in range(0, config.num_steps):
             global_step += config.num_envs
@@ -179,14 +197,23 @@ def main():
             with torch.no_grad():
                 start_tmp = time.time()
                 actions = agents.get_actions(next_obs)
-                time_counter.update({"policy_sample": time.time() - start_tmp})
+                time_counter["policy_sample"] += time.time() - start_tmp
             
-            
+            selected_actions = {"AGV": set(), "PICKER": set()}
             for agent_id, action in actions.items():
-                location = env.item_loc_dict.get(int(action), (-1, 0))
+                action_shifted = action
+                agent_type = agent_id.split("_")[0]
+                if agent_type == "PICKER" and action != 0:
+                    action_shifted = action + len(env.goals)
+                    
+                location = env.item_loc_dict.get(int(action_shifted), (-1, 0))
                 actions_data[agent_id][iteration // 50, action] += 1
                 actions_layout_data[agent_id][(iteration // 50,) + location] += 1
                 if not infos[agent_id]["busy"]:
+                    if action_shifted > (len(env.goals) + 1):
+                        if action_shifted in selected_actions[agent_type]:
+                            duplicate_action_count[agent_type] += 1
+                        selected_actions[agent_type].add(action_shifted)
                     actions_relevant_data[agent_id][iteration // 50, action] += 1
                     actions_layout_relevant_data[agent_id][(iteration // 50,) + location] += 1
 
@@ -197,7 +224,7 @@ def main():
             # TRY NOT TO MODIFY: execute the game and log data.
             start_tmp = time.time()
             next_obs, rewards, terminations, truncations, infos = env.step(actions)
-            time_counter.update({"step": time.time() - start_tmp})
+            time_counter["step"] += time.time() - start_tmp
 
 
             agents.add_rewards(rewards)
@@ -220,6 +247,8 @@ def main():
         log_data["time/rollout"] = end_time_rollout - start_time_rollout
         log_data["time/step"] = time_counter["step"]
         log_data["time/policy_sample"] = time_counter["policy_sample"]
+        for agent_type, count in duplicate_action_count.items():
+            log_data[f"info/duplicate_{agent_type}_shelf_action"] = count
 
         start_time_train = time.time()
         log_data.update(agents.train())
