@@ -7,15 +7,17 @@ import plotly.express as px
 import torch
 import tyro
 from tarware import Warehouse
-
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 from agent import MultiAgentModule
-from train import Config
+from train import Config, PolicyModule
 
+
+MODEL_DIR = "models/ippo_24-05-24_19:42:38"
 
 def main():
     config = tyro.cli(Config)
-    config.num_iterations = 1
-    config.model = "models/ippo_24-05-24_19:42:38"
+    config.num_iterations = 5
+    config.save_video = True
 
     # TRY NOT TO MODIFY: seeding
     random.seed(config.seed)
@@ -28,6 +30,7 @@ def main():
 
     # env setup
     env_config = config.warehouse
+    env_config.render_mode = "rgb_array"
     env = Warehouse(**asdict(env_config))
 
     if config.ma_algorithm == "snppo":
@@ -36,7 +39,8 @@ def main():
         agent_policy_mapping = {agent_id: agent_id for agent_id in env.possible_agents}
     
     agents = MultiAgentModule(agent_policy_mapping, env, config)
-    agents.load(config.model)
+    if not config.policy_module == PolicyModule.Heuristic:
+        agents.load(MODEL_DIR)
 
     next_obs, infos = env.reset(seed=config.seed)
 
@@ -52,9 +56,11 @@ def main():
         next_obs, infos = env.reset(seed=config.seed + iteration)
         next_done = {agent_id: False for agent_id in next_obs.keys()}
         episode_done = False
+        recorded_frames = []
         while not episode_done:
 
-            env.render()
+            if config.save_video:
+                recorded_frames.append(env.render())
 
             # agents.add_observations_dones(next_obs, next_done)
             # ALGO LOGIC: action logic
@@ -85,10 +91,12 @@ def main():
                 for metric_name, data in infos["__common__"].items():
                     log_metrics[f"info/{metric_name}"].append(float(data))
 
+        if config.save_video:
+            clip = ImageSequenceClip(recorded_frames, fps=2)
+            clip.write_videofile(f"analysis/videos/iteration_{iteration}.mp4")
         print(f"pickrate: {sum(log_metrics['info/pickrate']) / len(log_metrics['info/pickrate'])}")
 
     log_data = {name: sum(data) / len(data) if len(data) > 0 else 0 for name, data in log_metrics.items()}
-    # agents.train()
 
     for name, data in log_data.items():
         print(f"{name}: {data}")

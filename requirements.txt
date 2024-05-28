@@ -8,3 +8,5 @@ wandb
 pandas
 plotly
 kaleido
+pyglet==1.5
+moviepy
