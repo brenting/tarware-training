@@ -186,7 +186,6 @@ def main():
 
         start_time_rollout = time.time()
         time_counter = defaultdict(float)
-        duplicate_action_count = {"AGV": 0, "PICKER": 0}
         log_metrics = defaultdict(list)
         for _ in range(0, config.num_steps):
             global_step += config.num_envs
@@ -199,7 +198,6 @@ def main():
                 actions = agents.get_actions(next_obs)
                 time_counter["policy_sample"] += time.time() - start_tmp
             
-            selected_actions = {"AGV": set(), "PICKER": set()}
             for agent_id, action in actions.items():
                 action_shifted = action
                 agent_type = agent_id.split("_")[0]
@@ -210,10 +208,6 @@ def main():
                 actions_data[agent_id][iteration // 50, action] += 1
                 actions_layout_data[agent_id][(iteration // 50,) + location] += 1
                 if not infos[agent_id]["busy"]:
-                    if action_shifted > (len(env.goals) + 1):
-                        if action_shifted in selected_actions[agent_type]:
-                            duplicate_action_count[agent_type] += 1
-                        selected_actions[agent_type].add(action_shifted)
                     actions_relevant_data[agent_id][iteration // 50, action] += 1
                     actions_layout_relevant_data[agent_id][(iteration // 50,) + location] += 1
 
@@ -247,8 +241,6 @@ def main():
         log_data["time/rollout"] = end_time_rollout - start_time_rollout
         log_data["time/step"] = time_counter["step"]
         log_data["time/policy_sample"] = time_counter["policy_sample"]
-        for agent_type, count in duplicate_action_count.items():
-            log_data[f"info/duplicate_{agent_type}_shelf_action"] = count
 
         start_time_train = time.time()
         log_data.update(agents.train())
