@@ -477,19 +477,19 @@ class HeuristicPolicyModule:
 
         # self.lane_assignment.update({agent_id: env.item_loc_dict[delivery_id][1] for agent_id, delivery_id in self.delivery_assignment.items()})
 
-        self.shelf_preferences = {}
+        self.ordinal_shelf_preferences = {}
         y_factor = 8
         for agent_id in agent_ids:
-            shelf_preference = []
+            cardinal_shelf_preference = []
             lane_y = self.lane_assignment[agent_id]
             for item_id in range(len(env.item_loc_dict)):
                 x, y = env.item_loc_dict[item_id + 1]
                 if x == x_delivery:
                     continue
-                shelf_preference.append(math.sqrt((x - x_agent_ref)**2 + ((y - lane_y) * y_factor)**2))
+                cardinal_shelf_preference.append(math.sqrt((x - x_agent_ref)**2 + ((y - lane_y) * y_factor)**2))
             
-            shelf_preference_sorted = [sorted(shelf_preference).index(x) for x in shelf_preference]
-            self.shelf_preferences[agent_id] = np.array(shelf_preference_sorted, dtype=np.int64)
+            ordinal_shelf_preference = [sorted(cardinal_shelf_preference).index(x) for x in cardinal_shelf_preference]
+            self.ordinal_shelf_preferences[agent_id] = np.array(ordinal_shelf_preference, dtype=np.int64)
 
 
     def get_actions(self, observations: dict[str, Any]):
@@ -508,7 +508,7 @@ class HeuristicPolicyModule:
             any_shelves = np.any(shelves_mask)
 
             if any_shelves:
-                action_preferences = np.where(shelves_mask, self.shelf_preferences[agent_id], 1e6)
+                action_preferences = np.where(shelves_mask, self.ordinal_shelf_preferences[agent_id], 1e6)
                 action = np.int64(np.argmin(action_preferences) + shelf_action_shift)
             elif to_deliver:
                 action = np.int64(self.delivery_assignment[agent_id])
