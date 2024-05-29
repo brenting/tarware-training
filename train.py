@@ -47,9 +47,8 @@ class WarehouseConfig:
     observation_type: Literal["flattened", "identifier", "status", "none"] = "flattened"
     normalised_coordinates: bool = False
     render_mode: str | None = None
-    action_masking: bool = True
+    action_masking_level: int = 2
     sample_collection: Literal["all", "masking", "relevant"] = "masking"
-    improved_masking: bool = False
     agents_can_clash: bool = True
 
 
