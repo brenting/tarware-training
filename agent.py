@@ -273,7 +273,7 @@ class PPOPolicyModule:
         b_obs = batch["observations"].reshape((-1,) + self.observation_space.shape)
         b_logprobs = batch["logprobs"].reshape(-1)
         b_actions = batch["actions"].reshape((-1,) + self.action_space.shape)
-        if self.config.warehouse.action_masking:
+        if self.config.warehouse.action_masking_level > 0:
             b_action_mask = batch["action_masks"].reshape((-1,) + flatten_space(self.action_space).shape)
         b_advantages = batch["advantages"].reshape(-1)
         b_returns = batch["returns"].reshape(-1)
@@ -291,7 +291,7 @@ class PPOPolicyModule:
                 end = start + minibatch_size
                 mb_inds = b_inds[start:end]
 
-                if self.config.warehouse.action_masking:
+                if self.config.warehouse.action_masking_level > 0:
                     _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(b_obs[mb_inds], action=b_actions.long()[mb_inds], action_masks=b_action_mask[mb_inds])
                 else:
                     _, newlogprob, entropy, newvalue = self.policy.get_action_and_value(b_obs[mb_inds], action=b_actions.long()[mb_inds])
