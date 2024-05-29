@@ -1,22 +1,23 @@
 import random
 from collections import defaultdict
 from dataclasses import asdict
+from pathlib import Path
 
 import numpy as np
 import plotly.express as px
 import torch
 import tyro
-from tarware import Warehouse
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+from tarware import Warehouse
+
 from agent import MultiAgentModule
 from train import Config, PolicyModule
-
 
 MODEL_DIR = "models/ippo_24-05-24_19:42:38"
 
 def main():
     config = tyro.cli(Config)
-    config.num_iterations = 5
+    config.num_iterations = 20
     config.save_video = False
 
     # TRY NOT TO MODIFY: seeding
@@ -92,6 +93,9 @@ def main():
                     log_metrics[f"info/{metric_name}"].append(float(data))
 
         if config.save_video:
+            video_dir = Path("analysis", "videos")
+            if not video_dir.exists():
+                video_dir.mkdir(parents=True)
             clip = ImageSequenceClip(recorded_frames, fps=2)
             clip.write_videofile(f"analysis/videos/iteration_{iteration}.mp4")
         print(f"pickrate: {sum(log_metrics['info/pickrate']) / len(log_metrics['info/pickrate'])}")
@@ -100,6 +104,9 @@ def main():
 
     for name, data in log_data.items():
         print(f"{name}: {data}")
+    
+    figure_dirs = [Path("analysis", "figures", f"actions_layout{i}") for i in ["", "_relevant", "_log","_log_relevant"]]
+    [figure_dir.mkdir(parents=True) for figure_dir in figure_dirs if not figure_dir.exists()]
     [px.imshow(actions, text_auto=True).write_html(f"analysis/figures/actions_layout/{agent_id}.html") for agent_id, actions in actions_layout_data.items()]
     [px.imshow(actions, text_auto=True).write_html(f"analysis/figures/actions_layout_relevant/{agent_id}.html") for agent_id, actions in actions_layout_relevant_data.items()]
     [px.imshow(np.log10(actions + 1), text_auto=True).write_html(f"analysis/figures/actions_layout_log/{agent_id}.html") for agent_id, actions in actions_layout_data.items()]
