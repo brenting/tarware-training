@@ -17,7 +17,7 @@ MODEL_DIR = "models/ippo_24-05-24_19:42:38"
 def main():
     config = tyro.cli(Config)
     config.num_iterations = 5
-    config.save_video = True
+    config.save_video = False
 
     # TRY NOT TO MODIFY: seeding
     random.seed(config.seed)
